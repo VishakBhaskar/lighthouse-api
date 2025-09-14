@@ -1,8 +1,7 @@
 // index.js
 import express from "express";
 import lighthouse from "lighthouse";
-import * as chromeLauncher from "chrome-launcher"; // important: no default
-
+import puppeteer from "puppeteer";
 
 function extractMetricsFromLHR(lhr) {
   const audits = (lhr && lhr.audits) || {};
@@ -18,49 +17,6 @@ function extractMetricsFromLHR(lhr) {
       audits["interaction-to-next-paint"]?.numericValue ||
       null,
   };
-}
-
-async function runOnce(url) {
-  let chrome;
-  try {
-    chrome = await chromeLauncher.launch({
-      chromeFlags: [
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-      ],
-    });
-
-    const options = {
-      logLevel: "error",
-      output: "json",
-      port: chrome.port,
-      throttlingMethod: "simulate",
-      throttling: {
-        rttMs: 150,
-        throughputKbps: 1638.4,
-        cpuSlowdownMultiplier: 4,
-      },
-      formFactor: "mobile",
-      screenEmulation: {
-        mobile: true,
-        width: 412,
-        height: 823,
-        deviceScaleFactor: 1.75,
-      },
-    };
-
-    const runnerResult = await lighthouse(url, options);
-    return { success: true, metrics: extractMetricsFromLHR(runnerResult.lhr) };
-  } catch (err) {
-    return { success: false, error: err.message || String(err) };
-  } finally {
-    if (chrome) {
-      try { await chrome.kill(); } catch (e) {}
-    }
-  }
 }
 
 function averageMetrics(results) {
@@ -85,26 +41,78 @@ function averageMetrics(results) {
   return avg;
 }
 
+async function runLighthouseWithPuppeteer(browser, url) {
+  // get remote debugging port from Puppeteer
+  const wsEndpoint = browser.wsEndpoint(); // ws://127.0.0.1:XXXXX/devtools/browser/...
+  const port = new URL(wsEndpoint).port;
+
+  const options = {
+    logLevel: "error",
+    output: "json",
+    port: port,
+    throttlingMethod: "simulate",
+    throttling: {
+      rttMs: 150,
+      throughputKbps: 1638.4,
+      cpuSlowdownMultiplier: 4,
+    },
+    formFactor: "mobile",
+    screenEmulation: {
+      mobile: true,
+      width: 412,
+      height: 823,
+      deviceScaleFactor: 1.75,
+    },
+  };
+
+  const runnerResult = await lighthouse(url, options);
+  return extractMetricsFromLHR(runnerResult.lhr);
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get("/audit", async (req, res) => {
   const { url, runs } = req.query;
   if (!url) return res.status(400).json({ error: "Missing ?url parameter" });
-
   const numRuns = Math.max(1, parseInt(runs || "3", 10));
+
+  let browser;
   const results = [];
 
-  for (let i = 0; i < numRuns; i++) {
-    // runs sequentially to avoid overload
-    const result = await runOnce(url);
-    results.push(result);
-  }
+  try {
+    // Launch a single browser for this request and reuse it for multiple runs
+    browser = await puppeteer.launch({
+  headless: "new",
+  executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, // 👈 important
+  args: [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu"
+  ],
+});
 
-  const avg = averageMetrics(results);
-  res.json({ url, runs: numRuns, results, average: avg });
+    for (let i = 0; i < numRuns; i++) {
+      try {
+        const metrics = await runLighthouseWithPuppeteer(browser, url);
+        results.push({ success: true, metrics });
+      } catch (err) {
+        results.push({ success: false, error: String(err) });
+      }
+    }
+
+    const avg = averageMetrics(results);
+    res.json({ url, runs: numRuns, results, average: avg });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  } finally {
+    if (browser) {
+      try { await browser.close(); } catch (e) {}
+    }
+  }
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Lighthouse API running on http://localhost:${PORT}`);
+  console.log(`✅ Lighthouse API running on port ${PORT}`);
 });
