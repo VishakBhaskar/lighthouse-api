@@ -1,9 +1,11 @@
 # Use official Node image
 FROM node:18-bullseye
 
-# Install Chromium dependencies
+# Install Chromium dependencies + build tools
 RUN apt-get update && apt-get install -y \
     chromium \
+    build-essential \
+    python3 \
     ca-certificates \
     fonts-liberation \
     libasound2 \
@@ -25,17 +27,18 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy package files and install deps
+# Copy package files first
 COPY package*.json ./
+
+# Install dependencies
 RUN npm install --omit=dev
 
-# Copy app code
+# Copy application code
 COPY . .
 
-# Environment vars
+# Puppeteer path
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Expose API port
